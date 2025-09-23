@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  deploy-frontend:
+    image: thanglele/rl-robot-api:latest
+    container_name: rl-robot-api
+    ports:
+      - "8000:8000"
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
