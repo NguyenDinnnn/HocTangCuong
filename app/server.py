@@ -63,6 +63,19 @@ else:
     ql_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
 
 # ---------------------------
+## Load SARSA
+# ---------------------------
+sarsa_qfile = os.path.join(models_dir, "sarsa_qtable.pkl")
+if os.path.exists(sarsa_qfile):
+    with open(sarsa_qfile, "rb") as f:
+        loaded_sarsa_Q = pickle.load(f)
+    # Khôi phục defaultdict và cập nhật dữ liệu
+    sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    sarsa_Q.update(loaded_sarsa_Q)
+else:
+    sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    
+# ---------------------------
 # Load A2C
 # ---------------------------
 a2c_model_file = os.path.join(models_dir, "a2c_model.pth")
@@ -290,6 +303,36 @@ def step_algorithm(req: AlgorithmRequest):
             state_xy = next_state
             reward = r
             epsilon = max(0.1, epsilon * 0.995)
+            
+        elif algo == "SARSA":
+            # Chọn hành động A từ trạng thái S theo chính sách epsilon-greedy
+            if np.random.rand() < epsilon:
+                action_name = np.random.choice(actions)
+            else:
+                action_name = max(sarsa_Q[full_state], key=sarsa_Q[full_state].get)
+            
+            action_idx = actions.index(action_name)
+            
+            # Thực hiện hành động A, nhận S' và R
+            next_state, r, done, _ = env.step(action_idx)
+            
+            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            next_state_tuple = (next_state[0], next_state[1], next_visited_code)
+
+            # Chọn hành động tiếp theo A' từ S' theo chính sách epsilon-greedy
+            if np.random.rand() < epsilon:
+                next_action_name = np.random.choice(actions)
+            else:
+                next_action_name = max(sarsa_Q[next_state_tuple], key=sarsa_Q[next_state_tuple].get)
+            
+            # Cập nhật Q-table theo công thức SARSA
+            sarsa_Q[full_state][action_name] += alpha * (
+                r + gamma * sarsa_Q[next_state_tuple][next_action_name] - sarsa_Q[full_state][action_name]
+            )
+
+            state_xy = next_state
+            reward = r
+            epsilon = max(0.1, epsilon * 0.995)
 
         elif algo == "A2C":
             state_tensor = env.build_grid_state().unsqueeze(0)
@@ -365,6 +408,12 @@ def save_mc():
     with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f:
         pickle.dump(mc_Q, f)
     return {"status": "MC Q-table saved"}
+
+@app.post("/save_sarsa")
+def save_sarsa():
+    with open(os.path.join(models_dir, 'sarsa_qtable.pkl'), 'wb') as f:
+        pickle.dump(sarsa_Q, f)
+    return {"status": "SARSA Q-table saved"}
 
 @app.post("/save_a2c")
 def save_a2c():
