@@ -209,6 +209,41 @@ def reset(req: ResetRequest):
         state = env.reset(max_steps=ms)
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
+# ---------------------------
+# Reset All API
+# ---------------------------
+@app.post("/reset_all")
+def reset_all():
+    global env
+    with _env_lock:
+        # Random lại obstacles, waypoints và goal
+        w, h = env.width, env.height
+        start = (0, 0)
+
+        # Random obstacles
+        all_cells = [(x, y) for x in range(w) for y in range(h) if (x, y) != start]
+        random.shuffle(all_cells)
+        obstacles = all_cells[:8]   # ví dụ chọn 8 chướng ngại vật
+
+        # Random 2 waypoint + 1 goal
+        remain = [cell for cell in all_cells if cell not in obstacles]
+        waypoints = remain[:2]
+        goal = remain[2]
+
+        # Tạo môi trường mới
+        env = GridWorldEnv(w, h, start, goal, obstacles, waypoints, max_steps=500)
+        state = env.reset(max_steps=500)
+
+        return {
+            "state": state,
+            "map": env.get_map(),
+            "ascii": env.render_ascii(),
+            "obstacles": obstacles,
+            "waypoints": waypoints,
+            "goal": goal,
+            "rewards_over_time": []   # reset luôn biểu đồ
+        }
+        
 @app.get("/state")
 def get_state():
     with _env_lock:
