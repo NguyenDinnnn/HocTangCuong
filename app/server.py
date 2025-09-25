@@ -80,6 +80,20 @@ sarsa_Q = _load_qtable(sarsa_qfile)
 
 # ---------------------------
 # Load A2C model
+## Load SARSA
+# ---------------------------
+sarsa_qfile = os.path.join(models_dir, "sarsa_qtable.pkl")
+if os.path.exists(sarsa_qfile):
+    with open(sarsa_qfile, "rb") as f:
+        loaded_sarsa_Q = pickle.load(f)
+    # Khôi phục defaultdict và cập nhật dữ liệu
+    sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    sarsa_Q.update(loaded_sarsa_Q)
+else:
+    sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    
+# ---------------------------
+# Load A2C
 # ---------------------------
 a2c_model_file = os.path.join(models_dir, "a2c_model.pth")
 in_channels = 5
@@ -214,6 +228,43 @@ def reset(req: ResetRequest):
         epsilon = 0.3  # Start with balanced exploration
         state = env.reset(max_steps=ms)
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
+
+import random
+
+# ---------------------------
+# Reset All API
+# ---------------------------
+@app.post("/reset_all")
+def reset_all():
+    global env
+    with _env_lock:
+        # Random lại obstacles, waypoints và goal
+        w, h = env.width, env.height
+        start = (0, 0)
+
+        # Random obstacles
+        all_cells = [(x, y) for x in range(w) for y in range(h) if (x, y) != start]
+        random.shuffle(all_cells)
+        obstacles = all_cells[:8]   # ví dụ chọn 8 chướng ngại vật
+
+        # Random 2 waypoint + 1 goal
+        remain = [cell for cell in all_cells if cell not in obstacles]
+        waypoints = remain[:2]
+        goal = remain[2]
+
+        # Tạo môi trường mới
+        env = GridWorldEnv(w, h, start, goal, obstacles, waypoints, max_steps=500)
+        state = env.reset(max_steps=500)
+
+        return {
+            "state": state,
+            "map": env.get_map(),
+            "ascii": env.render_ascii(),
+            "obstacles": obstacles,
+            "waypoints": waypoints,
+            "goal": goal,
+            "rewards_over_time": []   # reset luôn biểu đồ
+        }
 
 @app.get("/state")
 def get_state():
@@ -450,6 +501,37 @@ def step_algorithm(req: AlgorithmRequest):
             state_xy = next_state
             # Optimized epsilon decay for SARSA
             epsilon = max(epsilon_min, epsilon * epsilon_decay)
+            epsilon = max(0.1, epsilon * 0.995)
+            
+        elif algo == "SARSA":
+            # Chọn hành động A từ trạng thái S theo chính sách epsilon-greedy
+            if np.random.rand() < epsilon:
+                action_name = np.random.choice(actions)
+            else:
+                action_name = max(sarsa_Q[full_state], key=sarsa_Q[full_state].get)
+            
+            action_idx = actions.index(action_name)
+            
+            # Thực hiện hành động A, nhận S' và R
+            next_state, r, done, _ = env.step(action_idx)
+            
+            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            next_state_tuple = (next_state[0], next_state[1], next_visited_code)
+
+            # Chọn hành động tiếp theo A' từ S' theo chính sách epsilon-greedy
+            if np.random.rand() < epsilon:
+                next_action_name = np.random.choice(actions)
+            else:
+                next_action_name = max(sarsa_Q[next_state_tuple], key=sarsa_Q[next_state_tuple].get)
+            
+            # Cập nhật Q-table theo công thức SARSA
+            sarsa_Q[full_state][action_name] += alpha * (
+                r + gamma * sarsa_Q[next_state_tuple][next_action_name] - sarsa_Q[full_state][action_name]
+            )
+
+            state_xy = next_state
+            reward = r
+            epsilon = max(0.1, epsilon * 0.995)
 
         elif algo == "A2C":
             state_tensor = env.build_grid_state().unsqueeze(0)

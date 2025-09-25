@@ -73,12 +73,14 @@
           </div>
           
           <div class="button-group">
-            <button class="btn btn-start" onclick="startAutoMove()">▶ Auto Move</button>
+            <button class="btn btn-start" onclick="startAutoMove('random')">▶ Auto Move (Random)</button>
+            <button class="btn btn-start" onclick="startAutoMove('greedy')">▶ Auto Move (Greedy)</button>
             <button class="btn btn-stop" onclick="stopAll()">🛑 Stop</button>
           </div>
-          
+                    
           <div class="button-group">
             <button class="btn btn-reset" onclick="resetGrid()">🔄 Reset</button>
+            <button class="btn btn-reset" onclick="resetAllGrid()">🌍 Reset All</button>
             <button class="btn btn-debug" onclick="toggleDebug()">🔧 Debug</button>
           </div>
           
@@ -102,6 +104,7 @@
           <div class="algorithm-buttons">
             <button class="btn-algorithm" onclick="runAlgorithm('MC')">Monte Carlo</button>
             <button class="btn-algorithm" onclick="runAlgorithm('Q-learning')">Q-Learning</button>
+            <button class="btn-algorithm" onclick="runAlgorithm('SARSA')">SARSA</button>
             <button class="btn-algorithm" onclick="runAlgorithm('A2C')">A2C</button>
             <button class="btn-algorithm" onclick="runAStar()">A*</button>
           </div>
@@ -274,29 +277,84 @@ function toggleDebug(){
 }
 
 // ---------------- Auto Move ----------------
-async function autoStep(){
-    let prevPos=[...robotPos];
-    let resp = await fetch("/state");
-    let data = await resp.json();
-    robotPos = data.state;
-    visitedWaypoints = data.visited_waypoints || [];
-    updateRobot(prevPos, robotPos);
+
+// Hàm move như trước (di chuyển robot 1 bước)
+function move(dx, dy) {
+    let newX = robotPos[0] + dx;
+    let newY = robotPos[1] + dy;
+    if (newX >= 0 && newX < gridSizeX && newY >= 0 && newY < gridSizeY) {
+        // check obstacle
+        if (!obstacles.some(o => o[0] === newX && o[1] === newY)) {
+            let prevPos = [...robotPos];
+            robotPos = [newX, newY];
+            trajectoryPoints.push([...robotPos]);
+            updateRobot(prevPos, robotPos);
+        }
+    }
 }
 
-function startAutoMove(){
-    if(autoMoving) return;
-    autoMoving = true; algoMoving=false;
+// Auto step theo random
+function autoStepRandom() {
+    const actions = [
+        [0, 1],   // xuống
+        [0, -1],  // lên
+        [1, 0],   // phải
+        [-1, 0],  // trái
+    ];
+    let action = actions[Math.floor(Math.random() * actions.length)];
+    move(action[0], action[1]);
+}
+
+// Auto step theo greedy (tham lam → chọn gần goal nhất)
+function autoStepGreedy() {
+    const actions = [
+        [0, 1],
+        [0, -1],
+        [1, 0],
+        [-1, 0],
+    ];
+    let bestAction = null;
+    let bestDist = Infinity;
+
+    for (let [dx, dy] of actions) {
+        let newX = robotPos[0] + dx;
+        let newY = robotPos[1] + dy;
+
+        if (newX >= 0 && newX < gridSizeX && newY >= 0 && newY < gridSizeY) {
+            if (!obstacles.some(o => o[0] === newX && o[1] === newY)) {
+                let dist = Math.abs(goal[0] - newX) + Math.abs(goal[1] - newY);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestAction = [dx, dy];
+                }
+            }
+        }
+    }
+
+    if (bestAction) move(bestAction[0], bestAction[1]);
+}
+
+// Chọn mode auto: "random" hoặc "greedy"
+let autoMode = "random"; // mặc định random
+
+function startAutoMove(mode = "random") {
+    if (autoMoving) return;
+    autoMoving = true; algoMoving = false;
+    autoMode = mode;
     startTime = performance.now();
     trajectoryPoints = [[...robotPos]];
-    intervalId = setInterval(autoStep, 300);
-    document.getElementById("msg").innerText = "Auto move bắt đầu";
+    intervalId = setInterval(() => {
+        if (autoMode === "random") autoStepRandom();
+        else if (autoMode === "greedy") autoStepGreedy();
+    }, 300);
+    document.getElementById("msg").innerText = "Auto move (" + autoMode + ") bắt đầu";
 }
 
-function stopAll(){
-    autoMoving=false; algoMoving=false; currentAlgo=null;
-    if(intervalId) clearInterval(intervalId);
-    intervalId=null;
-    document.getElementById("msg").innerText="Đã dừng robot";
+function stopAll() {
+    autoMoving = false; algoMoving = false; currentAlgo = null;
+    if (intervalId) clearInterval(intervalId);
+    intervalId = null;
+    document.getElementById("msg").innerText = "Đã dừng robot";
     document.getElementById("algoResult").style.display = "none";
 }
 
@@ -311,6 +369,30 @@ async function resetGrid(){
     document.getElementById("msg").innerText="Môi trường đã được reset";
     document.getElementById("current-time").innerText="-";
     trajectoryPoints=[]; clearTrajectory();
+}
+
+// ---------------- Reset All ----------------
+async function resetAllGrid(){
+    stopAll();
+    let resp = await fetch("/reset_all", {method:"POST"});
+    let data = await resp.json();
+    robotPos=data.state; goal=data.map.goal; obstacles=data.map.obstacles; waypoints=data.map.waypoints||[];
+    visitedWaypoints=[]; gridSizeX=data.map.width; gridSizeY=data.map.height;
+    drawGridOnce(); updateRobot([0,0], robotPos);
+
+    // Reset biểu đồ & stats
+    allAlgoData = {};
+    rewardChart.data.labels = [];
+    rewardChart.data.datasets = [];
+    rewardChart.update();
+
+    clearTrajectory();
+    document.getElementById("msg").innerText="🌍 Gridworld đã được reset toàn bộ";
+    document.getElementById("current-algorithm").innerText="-";
+    document.getElementById("current-reward").innerText="-";
+    document.getElementById("current-steps").innerText="-";
+    document.getElementById("current-waypoints").innerText="-";
+    document.getElementById("current-time").innerText="-";
 }
 
 // ---------------- Run RL Algorithms step-by-step ----------------
