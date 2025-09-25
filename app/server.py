@@ -209,6 +209,8 @@ def reset(req: ResetRequest):
         state = env.reset(max_steps=ms)
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
+import random
+
 # ---------------------------
 # Reset All API
 # ---------------------------
@@ -243,7 +245,7 @@ def reset_all():
             "goal": goal,
             "rewards_over_time": []   # reset luôn biểu đồ
         }
-        
+
 @app.get("/state")
 def get_state():
     with _env_lock:
