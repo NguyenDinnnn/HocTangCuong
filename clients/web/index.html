@@ -77,7 +77,7 @@
             <button class="btn btn-start" onclick="startAutoMove('greedy')">▶ Auto Move (Greedy)</button>
             <button class="btn btn-stop" onclick="stopAll()">🛑 Stop</button>
           </div>
-          
+                    
           <div class="button-group">
             <button class="btn btn-reset" onclick="resetGrid()">🔄 Reset</button>
             <button class="btn btn-reset" onclick="resetAllGrid()">🌍 Reset All</button>
@@ -355,23 +355,6 @@ function stopAll() {
     if (intervalId) clearInterval(intervalId);
     intervalId = null;
     document.getElementById("msg").innerText = "Đã dừng robot";
-    document.getElementById("algoResult").style.display = "none";
-}
-
-function startAutoMove(){
-    if(autoMoving) return;
-    autoMoving = true; algoMoving=false;
-    startTime = performance.now();
-    trajectoryPoints = [[...robotPos]];
-    intervalId = setInterval(autoStep, 300);
-    document.getElementById("msg").innerText = "Auto move bắt đầu";
-}
-
-function stopAll(){
-    autoMoving=false; algoMoving=false; currentAlgo=null;
-    if(intervalId) clearInterval(intervalId);
-    intervalId=null;
-    document.getElementById("msg").innerText="Đã dừng robot";
     document.getElementById("algoResult").style.display = "none";
 }
 
