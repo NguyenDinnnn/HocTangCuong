@@ -20,8 +20,8 @@ class GridWorldEnv:
 
         # Reward parameters
         self.step_penalty = -1
-        self.wall_penalty = -5
-        self.obstacle_penalty = -10
+        self.wall_penalty = -2
+        self.obstacle_penalty = -5
         self.waypoint_reward = 20
         self.goal_reward = 50
         self.goal_before_waypoints_penalty = -5
@@ -164,4 +164,3 @@ class GridWorldEnv:
         reward = 1 if target in self.waypoints else 0
         info = {"note": "Auto move by A*"}
         return target, reward, done, info
-
