@@ -29,10 +29,6 @@ waypoints = [(3,2),(6,5)]
 obstacles = [(1,1),(2,3),(4,4),(5,1),(7,6)]
 # CẬP NHẬT: Đặt giá trị mặc định cho max_steps
 env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=500)
-if not hasattr(env, 'episode_buffer'):
-    env.episode_buffer = []
-if not hasattr(env, 'state_visit_count'):
-    env.state_visit_count = defaultdict(int)
 
 # ---------------------------
 # Models dir
@@ -43,8 +39,6 @@ os.makedirs(models_dir, exist_ok=True)
 # ---------------------------
 # Load MC
 # ---------------------------
-
-
 mc_qfile = os.path.join(models_dir, "mc_qtable.pkl")
 if os.path.exists(mc_qfile):
     with open(mc_qfile, "rb") as f:
@@ -54,7 +48,6 @@ if os.path.exists(mc_qfile):
     mc_Q.update(loaded_mc_Q)
 else:
     mc_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
-      
 
 # ---------------------------
 # Load Q-learning
@@ -104,8 +97,7 @@ if os.path.exists(a2c_model_file):
 actions = ['up', 'right', 'down', 'left']
 alpha, gamma = 0.1, 0.99
 epsilon = 1.0
-mc_Q = defaultdict(lambda: {a: 0.1 for a in actions})
-mc_N = defaultdict(lambda: {a: 0 for a in actions})
+
 # ---------------------------
 # Request Models
 # ---------------------------
@@ -214,10 +206,7 @@ def reset(req: ResetRequest):
         ms = req.max_steps if req.max_steps is not None else 500
 
         env = GridWorldEnv(w, h, s, g, ob, wp, max_steps=ms)
-        env.episode_buffer = []
-        env.state_visit_count = defaultdict(int)
         state = env.reset(max_steps=ms)
-        
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
 import random
@@ -312,62 +301,24 @@ def step_algorithm(req: AlgorithmRequest):
         full_state = (state_xy[0], state_xy[1], visited_code)
 
         if algo == "MC":
-             # --- Khởi tạo episode_buffer nếu chưa có ---
-            if not hasattr(env, 'episode_buffer'):
-                env.episode_buffer = []
-
-            # --- Mã hóa trạng thái ---
-            def encode_visited(wp_list, visited_set):
-                code = 0
-                for i, wp in enumerate(wp_list):
-                    if wp in visited_set:
-                        code |= (1 << i)
-                return code
-
-            state_xy = env.get_state()
-            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            full_state = (state_xy[0], state_xy[1], visited_code)
-            # --- Chọn hành động theo epsilon-greedy ---
             if np.random.rand() > epsilon:
                 if full_state in mc_Q and any(mc_Q[full_state].values()):
-                    action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
+                     action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
                 else:
-                    # Hướng tới waypoint chưa thăm, nếu hết → goal
-                    targets = [wp for wp in env.waypoints if wp not in env.visited_waypoints] or [env.goal]
-                    target = targets[0]
-                    dx, dy = target[0]-state_xy[0], target[1]-state_xy[1]
-                    if abs(dx) > abs(dy):
-                        action_name = 'right' if dx>0 else 'left'
-                    else:
-                        action_name = 'down' if dy>0 else 'up'
+                     action_name = np.random.choice(actions)
             else:
                 action_name = np.random.choice(actions)
             action_idx = actions.index(action_name)
-            # --- Thực hiện hành động ---
-            next_state, reward, done, _ = env.step(action_idx)
-
-            # --- Lưu vào episode_buffer ---
-            env.episode_buffer.append((full_state, action_name, reward))
-
-            # --- Cập nhật Q-table theo First-Visit MC (duyệt xuôi) ---
-            visited_pairs = set()
-            for t, (s, a, r) in enumerate(env.episode_buffer):
-                G = sum((gamma**(k-t)) * env.episode_buffer[k][2] for k in range(t, len(env.episode_buffer)))
-                if (s, a) not in visited_pairs:
-                    mc_Q[s][a] += alpha * (G - mc_Q[s][a])
-                    visited_pairs.add((s, a))
-
-            # --- Reset buffer nếu done ---
-            if done or env.steps >= env.max_steps:
-                env.episode_buffer = []
-
-            # --- Cập nhật epsilon ---
-            epsilon = max(0.1, epsilon * 0.995)
-            # --- Cập nhật state ---
+            
+            next_state, r, done, _ = env.step(action_idx)
+            
+            # Update for MC after each step
+            # Đây là sự thay đổi lớn trong cách MC học, từ offline sang online, nhưng nó giúp mô phỏng từng bước
+            G = r + gamma * max(mc_Q[next_state].values())
+            mc_Q[full_state][action_name] += alpha * (G - mc_Q[full_state][action_name])
+            
+            reward = r
             state_xy = next_state
-            done = done or env.steps >= env.max_steps or env.state == env.goal
-
-
         
         elif algo == "Q-learning":
             if np.random.rand() < epsilon:
