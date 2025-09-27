@@ -82,7 +82,7 @@ if os.path.exists(a2c_model_file):
 # RL params
 # ---------------------------
 actions = ['up', 'right', 'down', 'left']
-alpha, gamma = 0.1, 0.99
+alpha, gamma = 0.1, 0.95
 epsilon = 1.0
 
 # ---------------------------
