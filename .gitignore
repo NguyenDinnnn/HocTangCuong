@@ -1,6 +1,5 @@
 .venv
 venv
 __pycache__
-app/__pycache__/server.cpython-313.pyc
-app/__pycache__/server.cpython-313.pyc
-.pkl
+*.pyc
+*.pkl
