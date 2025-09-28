@@ -164,4 +164,3 @@ class GridWorldEnv:
         reward = 1 if target in self.waypoints else 0
         info = {"note": "Auto move by A*"}
         return target, reward, done, info
-

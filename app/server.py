@@ -3,7 +3,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Tuple, Optional
 from threading import Lock
-import os, pickle, torch, numpy as np, time
+import os, pickle, torch, numpy as np, time, random
 import heapq
 from itertools import permutations
 from collections import defaultdict
@@ -27,7 +27,6 @@ start = (0,0)
 goal = (9,7)
 waypoints = [(3,2),(6,5)]
 obstacles = [(1,1),(2,3),(4,4),(5,1),(7,6)]
-# CẬP NHẬT: Đặt giá trị mặc định cho max_steps
 env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=500)
 
 # ---------------------------
@@ -43,7 +42,6 @@ mc_qfile = os.path.join(models_dir, "mc_qtable.pkl")
 if os.path.exists(mc_qfile):
     with open(mc_qfile, "rb") as f:
         loaded_mc_Q = pickle.load(f)
-    # CẬP NHẬT: Khôi phục defaultdict và cập nhật dữ liệu
     mc_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     mc_Q.update(loaded_mc_Q)
 else:
@@ -56,7 +54,6 @@ ql_qfile = os.path.join(models_dir, "qlearning_qtable.pkl")
 if os.path.exists(ql_qfile):
     with open(ql_qfile, "rb") as f:
         loaded_ql_Q = pickle.load(f)
-    # CẬP NHẬT: Khôi phục defaultdict và cập nhật dữ liệu
     ql_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     ql_Q.update(loaded_ql_Q)
 else:
@@ -69,7 +66,6 @@ sarsa_qfile = os.path.join(models_dir, "sarsa_qtable.pkl")
 if os.path.exists(sarsa_qfile):
     with open(sarsa_qfile, "rb") as f:
         loaded_sarsa_Q = pickle.load(f)
-    # Khôi phục defaultdict và cập nhật dữ liệu
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     sarsa_Q.update(loaded_sarsa_Q)
 else:
@@ -120,9 +116,19 @@ class AlgorithmRequest(BaseModel):
 class AStarRequest(BaseModel):
     goal: Optional[Tuple[int,int]] = None
 
+class SarsaTrainRequest(BaseModel):
+    episodes: int = 2000
+
 # ---------------------------
-# A* functions
+# Helper functions
 # ---------------------------
+def encode_visited(wp_list, visited_set):
+    code = 0
+    for i, wp in enumerate(wp_list):
+        if wp in visited_set:
+            code |= (1 << i)
+    return code
+
 def a_star(start, goal, obstacles, width, height):
     open_set = []
     heapq.heappush(open_set, (0+abs(start[0]-goal[0])+abs(start[1]-goal[1]), 0, start, [start]))
@@ -166,9 +172,6 @@ def plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height
             best_path = path
     return best_path or []
 
-# ---------------------------
-# Extend GridWorldEnv for A* step (RL-style reward)
-# ---------------------------
 def step_to_rl(self, target):
     self.state = target
     self.steps += 1
@@ -209,30 +212,19 @@ def reset(req: ResetRequest):
         state = env.reset(max_steps=ms)
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
-import random
-
-# ---------------------------
-# Reset All API
-# ---------------------------
 @app.post("/reset_all")
 def reset_all():
     global env
     with _env_lock:
-        # Random lại obstacles, waypoints và goal
         w, h = env.width, env.height
         start = (0, 0)
-
-        # Random obstacles
         all_cells = [(x, y) for x in range(w) for y in range(h) if (x, y) != start]
         random.shuffle(all_cells)
-        obstacles = all_cells[:8]   # ví dụ chọn 8 chướng ngại vật
-
-        # Random 2 waypoint + 1 goal
+        obstacles = all_cells[:8]
         remain = [cell for cell in all_cells if cell not in obstacles]
         waypoints = remain[:2]
         goal = remain[2]
 
-        # Tạo môi trường mới
         env = GridWorldEnv(w, h, start, goal, obstacles, waypoints, max_steps=500)
         state = env.reset(max_steps=500)
 
@@ -243,7 +235,7 @@ def reset_all():
             "obstacles": obstacles,
             "waypoints": waypoints,
             "goal": goal,
-            "rewards_over_time": []   # reset luôn biểu đồ
+            "rewards_over_time": []
         }
 
 @app.get("/state")
@@ -267,17 +259,13 @@ def step(inp: ActionInput):
             else:
                 return {"error": "No action provided"}
             return {
-                "state": s,
-                "reward": r,
-                "done": done,
-                "info": info,
-                "steps": env.steps,
-                "visited_waypoints": list(env.visited_waypoints),
+                "state": s, "reward": r, "done": done, "info": info,
+                "steps": env.steps, "visited_waypoints": list(env.visited_waypoints),
                 "ascii": env.render_ascii()
             }
         except ValueError as e:
             return {"error": str(e)}
-
+        
 # ---------------------------
 # Run RL Algorithm step by step
 # ---------------------------
@@ -391,18 +379,105 @@ def step_algorithm(req: AlgorithmRequest):
             "visited_waypoints": list(env.visited_waypoints)
         }
 
-# ---------------------------
-# Run A* Algorithm (unchanged)
-# ---------------------------
+@app.post("/train_and_run_sarsa")
+async def train_and_run_sarsa(req: SarsaTrainRequest):
+    with _env_lock:
+        start_time = time.time()
+        
+        # --- Giai đoạn 1: Huấn luyện ---
+        local_gamma = 0.99
+        local_alpha = 0.1
+        local_epsilon = 1.0
+        epsilon_decay = 0.999
+        min_epsilon = 0.05
+        episodes = req.episodes
+
+        local_sarsa_Q = defaultdict(lambda: {a: 0.0 for a in actions})
+        training_env = GridWorldEnv(
+            env.width, env.height, env.start, env.goal, 
+            list(env.obstacles), list(env.waypoints), max_steps=env.max_steps
+        )
+
+        for ep in range(episodes):
+            training_env.reset()
+            done = False
+            
+            state_xy = training_env.get_state()
+            visited_code = encode_visited(training_env.waypoints, training_env.visited_waypoints)
+            state = (state_xy[0], state_xy[1], visited_code)
+            
+            if random.random() < local_epsilon:
+                action = random.choice(actions)
+            else:
+                max_q = max(local_sarsa_Q[state].values())
+                best_actions = [a for a, q in local_sarsa_Q[state].items() if q == max_q]
+                action = random.choice(best_actions)
+
+            while not done:
+                action_idx = actions.index(action)
+                next_state_xy, reward, done, _ = training_env.step(action_idx)
+                
+                next_visited_code = encode_visited(training_env.waypoints, training_env.visited_waypoints)
+                next_state = (next_state_xy[0], next_state_xy[1], next_visited_code)
+                
+                if random.random() < local_epsilon:
+                    next_action = random.choice(actions)
+                else:
+                    max_q = max(local_sarsa_Q[next_state].values()) if next_state in local_sarsa_Q else 0.0
+                    best_actions = [a for a, q in local_sarsa_Q[next_state].items() if q == max_q] if next_state in local_sarsa_Q and any(local_sarsa_Q[next_state].values()) else actions
+                    next_action = random.choice(best_actions)
+
+                local_sarsa_Q[state][action] += local_alpha * (reward + local_gamma * local_sarsa_Q[next_state][next_action] - local_sarsa_Q[state][action])
+                
+                state = next_state
+                action = next_action
+
+            local_epsilon = max(min_epsilon, local_epsilon * epsilon_decay)
+
+        # --- Giai đoạn 2: Tìm đường đi tối ưu ---
+        env.reset()
+        path = [env.get_state()]
+        total_reward = 0
+        rewards_over_time = []
+        done = False
+
+        while not done and env.steps < env.max_steps:
+            state_xy = env.get_state()
+            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            current_state = (state_xy[0], state_xy[1], visited_code)
+
+            if current_state in local_sarsa_Q and any(local_sarsa_Q[current_state].values()):
+                action_name = max(local_sarsa_Q[current_state], key=local_sarsa_Q[current_state].get)
+            else:
+                break # Dừng nếu gặp trạng thái chưa biết
+            
+            action_idx = actions.index(action_name)
+            next_state, r, done, info = env.step(action_idx)
+            path.append(next_state)
+            total_reward += r
+            rewards_over_time.append(total_reward)
+
+        elapsed_time = time.time() - start_time
+        
+        global sarsa_Q
+        sarsa_Q.update(local_sarsa_Q) # Cập nhật Q-table toàn cục
+
+        return {
+            "algorithm": "SARSA", "path": path, "state": env.get_state(),
+            "reward": total_reward, "done": done, "steps": env.steps,
+            "visited_waypoints": list(env.visited_waypoints),
+            "info": {"note": f"Huấn luyện trong {episodes} episodes."},
+            "ascii": env.render_ascii(), "elapsed_time": elapsed_time,
+            "rewards_over_time": rewards_over_time
+        }
+
+
 @app.post("/run_a_star")
 def run_a_star(req: AStarRequest):
     with _env_lock:
         start_time = time.time()
         rewards_over_time = []
-        
-        start = env.get_state()
-        
-        path = plan_path_through_waypoints(start, env.waypoints, req.goal or env.goal,
+        path = plan_path_through_waypoints(env.get_state(), env.waypoints, req.goal or env.goal,
                                            env.obstacles, env.width, env.height)
         if not path:
             return {"error": "Không tìm thấy đường đi qua tất cả waypoint"}
@@ -418,16 +493,10 @@ def run_a_star(req: AStarRequest):
         elapsed_time = time.time() - start_time
         
         return {
-            "algorithm": "A*",
-            "path": path,
-            "state": env.get_state(),
-            "reward": total_reward,
-            "done": done,
-            "steps": env.steps,
-            "visited_waypoints": list(env.visited_waypoints),
-            "info": {},
-            "ascii": env.render_ascii(),
-            "elapsed_time": elapsed_time,
+            "algorithm": "A*", "path": path, "state": env.get_state(),
+            "reward": total_reward, "done": done, "steps": env.steps,
+            "visited_waypoints": list(env.visited_waypoints), "info": {},
+            "ascii": env.render_ascii(), "elapsed_time": elapsed_time,
             "rewards_over_time": rewards_over_time
         }
 
@@ -436,20 +505,17 @@ def run_a_star(req: AStarRequest):
 # ---------------------------
 @app.post("/save_qlearning")
 def save_qlearning():
-    with open(os.path.join(models_dir, 'qlearning_qtable.pkl'), 'wb') as f:
-        pickle.dump(ql_Q, f)
+    with open(os.path.join(models_dir, 'qlearning_qtable.pkl'), 'wb') as f: pickle.dump(dict(ql_Q), f)
     return {"status": "Q-learning Q-table saved"}
 
 @app.post("/save_mc")
 def save_mc():
-    with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f:
-        pickle.dump(mc_Q, f)
+    with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f: pickle.dump(dict(mc_Q), f)
     return {"status": "MC Q-table saved"}
 
 @app.post("/save_sarsa")
 def save_sarsa():
-    with open(os.path.join(models_dir, 'sarsa_qtable.pkl'), 'wb') as f:
-        pickle.dump(sarsa_Q, f)
+    with open(os.path.join(models_dir, 'sarsa_qtable.pkl'), 'wb') as f: pickle.dump(dict(sarsa_Q), f)
     return {"status": "SARSA Q-table saved"}
 
 @app.post("/save_a2c")
