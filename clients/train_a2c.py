@@ -1,173 +1,184 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
+from torch.distributions import Categorical
 import numpy as np
 import sys, os
-from torch.distributions import Categorical
 
+# --- THIẾT LẬP PATH ĐỂ IMPORT GridWorldEnv ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.robot_env import GridWorldEnv
 
-# =======================
-# Actor-Critic Model cho 5 kênh
-# =======================
+# --- CÁC THAM SỐ HYPERPARAMETERS ---
+GAMMA = 0.99           # Hệ số chiết khấu
+LR = 0.0007            # Tốc độ học
+ENTROPY_BETA = 0.01    # Hệ số cho Entropy Loss
+EPISODES = 50000       # Số tập huấn luyện mặc định
+
+
+# ----------------------------------------------------
+# 1. ĐỊNH NGHĨA MÔ HÌNH CNN A2C (Actor-Critic)
+# ----------------------------------------------------
 class ActorCritic(nn.Module):
-    def __init__(self, in_channels, height, width, n_actions):
+    """
+    Mô hình A2C sử dụng CNN cho đầu vào tensor 5 kênh (5, H, W).
+    """
+    def __init__(self, in_channels, height, width, n_actions): 
         super().__init__()
-        # Conv2d để xử lý grid 5 kênh
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
+        
+        self.cnn_extractor = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten()
         )
-        conv_out_size = 32 * height * width
-        hidden = 128
-        self.fc = nn.Sequential(
-            nn.Linear(conv_out_size, hidden),
-            nn.ReLU()
-        )
-        self.actor = nn.Linear(hidden, n_actions)
-        self.critic = nn.Linear(hidden, 1)
+        
+        feature_size = 64 * height * width
 
-    def forward(self, x):
-        x = self.conv(x)
-        features = self.fc(x)
-        policy_logits = self.actor(features)
-        value = self.critic(features)
+        # Actor trả về logits (KHÔNG softmax ở đây)
+        self.actor = nn.Sequential(
+            nn.Linear(feature_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_actions)
+        )
+        
+        self.critic = nn.Sequential(
+            nn.Linear(feature_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        
+    def forward(self, x: torch.Tensor):
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        
+        shared_output = self.cnn_extractor(x)
+        policy_logits = self.actor(shared_output)
+        value = self.critic(shared_output)
+        
         return policy_logits, value
 
-# =======================
-# Hàm Train A2C ĐÃ CHỈNH SỬA VÀ TỐI ƯU
-# =======================
-def train_a2c(model, env, optimizer, episodes=1000, gamma=0.95, max_steps=500):
-    # CÁC THAM SỐ ỔN ĐỊNH THUẬT TOÁN
-    CRITIC_COEFF = 0.5    # Giảm trọng số Critic Loss
-    ENTROPY_COEFF = 0.01  # Khuyến khích khám phá
-    REWARD_SCALE = 0.05   # Chia tỷ lệ Reward để ổn định tín hiệu
+
+# ----------------------------------------------------
+# 2. HÀM HUẤN LUYỆN CHÍNH
+# ----------------------------------------------------
+def calculate_returns(rewards: list, last_value: float):
+    """Tính toán Lợi nhuận Chiết khấu (Target Return) từ chuỗi phần thưởng."""
+    returns = []
+    R = last_value
+    for r in reversed(rewards):
+        R = r + GAMMA * R
+        returns.insert(0, R)
+    return torch.tensor(returns).float()
+
+
+def train_a2c(env, model: ActorCritic, num_episodes: int):
+    """
+    Thực hiện thuật toán huấn luyện Advantage Actor-Critic (A2C).
+    """
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+    episode_rewards = []
     
-    for ep in range(episodes):
+    print(f"Bắt đầu huấn luyện A2C trên môi trường {env.width}x{env.height} với {num_episodes} tập...")
+
+    for episode in range(num_episodes):
+        
         env.reset()
+        state_tensor = env.build_grid_state() 
         done = False
+        
+        log_probs, values, rewards, entropy_terms = [], [], [], []
         total_reward = 0
-        
-        log_probs = []
-        values = []
-        rewards = []
-        entropies = [] 
-        
-        state_tensor = env.build_grid_state().unsqueeze(0)
 
-        # 2. Vòng lặp thu thập dữ liệu (Rollout)
-        for step in range(max_steps):
-            policy_logits, value = model(state_tensor)
+        while not done and env.steps < env.max_steps:
+            state_tensor_batch = state_tensor.unsqueeze(0)
             
-            dist = Categorical(logits=policy_logits)
-            action = dist.sample()
+            policy_logits, value = model(state_tensor_batch)
+            action_probs = torch.softmax(policy_logits, dim=-1)  # softmax ở đây
+            m = Categorical(action_probs)
+            action = m.sample()
             
-            next_state, reward, done, info = env.step(action.item())
-            total_reward += reward
-
-            # Lưu dữ liệu
-            log_probs.append(dist.log_prob(action))
+            _, reward, done, _ = env.step(action.item())
+            next_state_tensor = env.build_grid_state()
+            
+            log_probs.append(m.log_prob(action))
             values.append(value)
+            rewards.append(reward)
+            entropy_terms.append(m.entropy())
+            total_reward += reward
             
-            # Áp dụng Reward Scaling
-            scaled_reward = reward * REWARD_SCALE 
-            rewards.append(torch.tensor([scaled_reward], dtype=torch.float32)) 
-            
-            entropies.append(dist.entropy())
+            state_tensor = next_state_tensor
 
-            state_tensor = env.build_grid_state().unsqueeze(0)
+        episode_rewards.append(total_reward)
 
-            if done:
-                break
-
-        # ==========================================================
-        # ======= Advantage Update (A2C CHUẨN - TD-BASED) =========
-        # ==========================================================
-        
-        # 1. Tính V_final (Bootstrapping Value)
-        last_state_tensor = state_tensor 
-        
         if done:
-            V_final = torch.tensor([0.0])
+            last_value = 0.0
         else:
-            with torch.no_grad(): 
-                _, V_final_tensor = model(last_state_tensor)
-            V_final = V_final_tensor.squeeze()
-
-        # 2. Tính N-step Return (Target G_t)
-        G = V_final.detach() 
-        returns = []
+            state_tensor_batch = state_tensor.unsqueeze(0)
+            with torch.no_grad():
+                _, last_value_tensor = model(state_tensor_batch)
+                last_value = last_value_tensor.item()
+            
+        returns = calculate_returns(rewards, last_value)
         
-        for r in reversed(rewards):
-            G = r.squeeze() + gamma * G 
-            returns.insert(0, G)
-        
-        # 3. Chuẩn bị cho Loss
         log_probs = torch.cat(log_probs)
         values = torch.cat(values).squeeze()
-        returns = torch.stack(returns).detach() 
-
-        # 4. Tính Advantage
-        advantage = returns - values 
-
-        # CHUẨN HÓA ADVANTAGE
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-
-        # 5. Tính Loss Function
-        actor_loss = -(log_probs * advantage.detach()).mean()
-        critic_loss = advantage.pow(2).mean() 
-        entropy_loss = torch.cat(entropies).mean()
+        entropy_terms = torch.cat(entropy_terms)
         
-        # Loss tổng
-        loss = actor_loss + (CRITIC_COEFF * critic_loss) - (ENTROPY_COEFF * entropy_loss)
+        advantages = returns - values
+        
+        critic_loss = advantages.pow(2).mean() 
+        actor_loss = -(log_probs * advantages.detach()).mean() 
+        entropy_loss = -ENTROPY_BETA * entropy_terms.mean()
 
-        # 6. Cập nhật Model
+        total_loss = actor_loss + critic_loss + entropy_loss
+        
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         optimizer.step()
 
-        if ep % 10 == 0:
-            reached_waypoints = len(env.visited_waypoints)
-            reached_goal = (env.state == env.goal)
-            print(
-                f"Episode {ep}, Total Reward: {total_reward}, "
-                f"Waypoints reached: {reached_waypoints}/{len(env.waypoints)}, "
-                f"Reached goal: {reached_goal}"
-            )
+        if (episode + 1) % 100 == 0:
+            avg_reward = np.mean(episode_rewards[-100:])
+            print(f"Episode: {episode + 1}/{num_episodes} | Avg Reward (100eps): {avg_reward:.2f} | Loss: {total_loss.item():.4f}")
+            
+    print("Quá trình huấn luyện A2C hoàn tất.")
+    return model, episode_rewards
 
-    # ========================
-    # Save model vào models/
-    # ========================
-    model_dir = os.path.join(os.path.dirname(__file__), "models")
-    os.makedirs(model_dir, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(model_dir, 'a2c_model.pth'))
-    print("A2C model saved successfully.")
-    # =======================
-# Main
-# =======================
+
+# ----------------------------------------------------
+# 3. CHẠY CHƯƠNG TRÌNH CHÍNH (MAIN BLOCK)
+# ----------------------------------------------------
 if __name__ == "__main__":
-    env = GridWorldEnv(
-        width=10, height=8,
-        start=(0,0), goal=(9,7),
-        obstacles=[(1,1),(2,3),(4,4),(5,1),(7,6)],
-        waypoints=[(3,2),(6,5)],
-        max_steps=300
+    
+    print("--- Chế độ chạy thử nghiệm A2C cục bộ ---")
+    
+    TEST_WIDTH = 10
+    TEST_HEIGHT = 8
+    TEST_START = (0,0)
+    TEST_GOAL = (9,7)
+    TEST_WAYPOINTS = [(3, 2), (6, 5)]
+    TEST_OBSTACLES = [(1,1),(2,3),(4,4),(5,1),(7,6)]
+    TEST_MAX_STEPS = 500
+    
+    # Khởi tạo môi trường
+    test_env = GridWorldEnv(
+        width=TEST_WIDTH, 
+        height=TEST_HEIGHT, 
+        start=TEST_START, 
+        goal=TEST_GOAL,
+        obstacles=TEST_OBSTACLES,
+        waypoints=TEST_WAYPOINTS,
+        max_steps=TEST_MAX_STEPS
     )
+    
+    ACTION_SIZE = len(test_env.ACTIONS)
 
-    in_channels = 5
-    n_actions = len(env.ACTIONS)
-    model = ActorCritic(in_channels, env.height, env.width, n_actions)
+    # Khởi tạo mô hình A2C
+    a2c_model = ActorCritic(in_channels=5, height=TEST_HEIGHT, width=TEST_WIDTH, n_actions=ACTION_SIZE)
 
-    model_path = os.path.join(os.path.dirname(__file__), "models", "a2c_model.pth")
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path))
-        print("Loaded previous A2C model, continue training...")
-
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    # CHỈ GỌI THAM SỐ ĐÚNG
-    train_a2c(model, env, optimizer, episodes=1000)
+    # Bắt đầu huấn luyện
+    final_model, rewards_history = train_a2c(test_env, a2c_model, num_episodes=EPISODES)
+    
+    print("\n--- Kết quả sau huấn luyện ---")
+    print(f"Phần thưởng trung bình 100 tập cuối: {np.mean(rewards_history[-100:]):.2f}")
