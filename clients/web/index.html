@@ -104,7 +104,7 @@
           <div class="algorithm-buttons">
             <button class="btn-algorithm" onclick="runAlgorithm('MC')">Monte Carlo</button>
             <button class="btn-algorithm" onclick="runAlgorithm('Q-learning')">Q-Learning</button>
-            <button class="btn-algorithm" onclick="runAlgorithm('SARSA')">SARSA</button>
+            <button class="btn-algorithm" onclick="trainAndRunSarsa()">SARSA</button>
             <button class="btn-algorithm" onclick="runAlgorithm('A2C')">A2C</button>
             <button class="btn-algorithm" onclick="runAStar()">A*</button>
           </div>
@@ -168,45 +168,26 @@ let robotPos = [0, 0], goal = [9, 7], obstacles = [], waypoints = [], visitedWay
 let autoMoving = false, algoMoving = false, intervalId = null, debugMode = false, currentAlgo = null;
 let startTime = null, endTime = null, trajectoryPoints = [];
 let allAlgoData = {};
-let currentAlgoData = { rewards: [], totalReward: 0 }; // Biến mới để lưu trữ dữ liệu của thuật toán đang chạy
 
 // ---------------- Chart ----------------
 const ctx = document.getElementById('rewardChart').getContext('2d');
 const rewardChart = new Chart(ctx, {
-    type: 'line',
-    data: { labels: [], datasets: [] },
-    options: {
-        responsive:true,
-        plugins:{ title:{ display:true, text:'Reward theo Step' } },
-        scales:{ x:{ title:{ display:true, text:'Step' } }, y:{ title:{ display:true, text:'Reward' } } }
-    }
+    type: 'line', data: { labels: [], datasets: [] },
+    options: { responsive:true, plugins:{ title:{ display:true, text:'Reward theo Step' } }, scales:{ x:{ title:{ display:true, text:'Step' } }, y:{ title:{ display:true, text:'Reward' } } } }
 });
 
-function randomColor(alpha=1){
-    const r=Math.floor(Math.random()*255), g=Math.floor(Math.random()*255), b=Math.floor(Math.random()*255);
-    return `rgba(${r},${g},${b},${alpha})`;
-}
+function randomColor(alpha=1){ return `rgba(${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},${Math.floor(Math.random()*255)},${alpha})`; }
 
 function updateChart() {
     rewardChart.data.datasets = [];
     let maxSteps = 0;
-    
-    for (const algo in allAlgoData) {
-        if (allAlgoData[algo].rewards.length > maxSteps) {
-            maxSteps = allAlgoData[algo].rewards.length;
-        }
-    }
+    for (const algo in allAlgoData) { if (allAlgoData[algo].rewards.length > maxSteps) maxSteps = allAlgoData[algo].rewards.length; }
     rewardChart.data.labels = Array.from({length: maxSteps}, (_, i) => i + 1);
-
     for (const algo in allAlgoData) {
         rewardChart.data.datasets.push({
-            label: algo,
-            data: allAlgoData[algo].rewards,
-            borderColor: allAlgoData[algo].color,
+            label: algo, data: allAlgoData[algo].rewards, borderColor: allAlgoData[algo].color,
             backgroundColor: allAlgoData[algo].color.replace('rgb', 'rgba').replace(')', ', 0.2)'),
-            fill: false,
-            tension: 0.3,
-            pointRadius: 0
+            fill: false, tension: 0.3, pointRadius: 0
         });
     }
     rewardChart.update();
@@ -254,108 +235,46 @@ function updateRobot(prevPos, newPos){
     });
 }
 
-// ---------------- Manual & Debug ----------------
+// ---------------- Điều khiển & Debug ----------------
 async function manualMove(dir){
     if(!debugMode) return;
     let prevPos = [...robotPos];
-    let resp = await fetch("/step",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({action_name:dir})
-    });
+    let resp = await fetch("/step",{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action_name:dir}) });
     let data=await resp.json();
-    if(!data.error){
-        robotPos = data.state;
-        visitedWaypoints = data.visited_waypoints || [];
-        updateRobot(prevPos, robotPos);
-    }
+    if(!data.error){ robotPos = data.state; visitedWaypoints = data.visited_waypoints || []; updateRobot(prevPos, robotPos); }
 }
+function toggleDebug(){ debugMode = !debugMode; document.getElementById("manualControls").style.display = debugMode?"block":"none"; }
 
-function toggleDebug(){
-    debugMode = !debugMode;
-    document.getElementById("manualControls").style.display = debugMode?"block":"none";
-}
-
-// ---------------- Auto Move ----------------
-
-// Hàm move như trước (di chuyển robot 1 bước)
+// ---------------- Auto Move & Stop ----------------
+let autoMode = "random";
 function move(dx, dy) {
-    let newX = robotPos[0] + dx;
-    let newY = robotPos[1] + dy;
-    if (newX >= 0 && newX < gridSizeX && newY >= 0 && newY < gridSizeY) {
-        // check obstacle
-        if (!obstacles.some(o => o[0] === newX && o[1] === newY)) {
-            let prevPos = [...robotPos];
-            robotPos = [newX, newY];
-            trajectoryPoints.push([...robotPos]);
-            updateRobot(prevPos, robotPos);
-        }
+    let newX = robotPos[0] + dx, newY = robotPos[1] + dy;
+    if (newX >= 0 && newX < gridSizeX && newY >= 0 && newY < gridSizeY && !obstacles.some(o => o[0] === newX && o[1] === newY)) {
+        let prevPos = [...robotPos]; robotPos = [newX, newY]; trajectoryPoints.push([...robotPos]); updateRobot(prevPos, robotPos);
     }
 }
-
-// Auto step theo random
-function autoStepRandom() {
-    const actions = [
-        [0, 1],   // xuống
-        [0, -1],  // lên
-        [1, 0],   // phải
-        [-1, 0],  // trái
-    ];
-    let action = actions[Math.floor(Math.random() * actions.length)];
-    move(action[0], action[1]);
-}
-
-// Auto step theo greedy (tham lam → chọn gần goal nhất)
+function autoStepRandom() { const actions = [[0, 1], [0, -1], [1, 0], [-1, 0]]; let action = actions[Math.floor(Math.random() * actions.length)]; move(action[0], action[1]); }
 function autoStepGreedy() {
-    const actions = [
-        [0, 1],
-        [0, -1],
-        [1, 0],
-        [-1, 0],
-    ];
-    let bestAction = null;
-    let bestDist = Infinity;
-
+    const actions = [[0, 1], [0, -1], [1, 0], [-1, 0]]; let bestAction = null, bestDist = Infinity;
     for (let [dx, dy] of actions) {
-        let newX = robotPos[0] + dx;
-        let newY = robotPos[1] + dy;
-
-        if (newX >= 0 && newX < gridSizeX && newY >= 0 && newY < gridSizeY) {
-            if (!obstacles.some(o => o[0] === newX && o[1] === newY)) {
-                let dist = Math.abs(goal[0] - newX) + Math.abs(goal[1] - newY);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestAction = [dx, dy];
-                }
-            }
+        let newX = robotPos[0] + dx, newY = robotPos[1] + dy;
+        if (newX >= 0 && newX < gridSizeX && newY >= 0 && newY < gridSizeY && !obstacles.some(o => o[0] === newX && o[1] === newY)) {
+            let dist = Math.abs(goal[0] - newX) + Math.abs(goal[1] - newY);
+            if (dist < bestDist) { bestDist = dist; bestAction = [dx, dy]; }
         }
     }
-
     if (bestAction) move(bestAction[0], bestAction[1]);
 }
-
-// Chọn mode auto: "random" hoặc "greedy"
-let autoMode = "random"; // mặc định random
-
 function startAutoMove(mode = "random") {
-    if (autoMoving) return;
-    autoMoving = true; algoMoving = false;
-    autoMode = mode;
-    startTime = performance.now();
-    trajectoryPoints = [[...robotPos]];
-    intervalId = setInterval(() => {
-        if (autoMode === "random") autoStepRandom();
-        else if (autoMode === "greedy") autoStepGreedy();
-    }, 300);
+    if (autoMoving) return; autoMoving = true; algoMoving = false; autoMode = mode;
+    startTime = performance.now(); trajectoryPoints = [[...robotPos]];
+    intervalId = setInterval(() => { if (autoMode === "random") autoStepRandom(); else if (autoMode === "greedy") autoStepGreedy(); }, 300);
     document.getElementById("msg").innerText = "Auto move (" + autoMode + ") bắt đầu";
 }
-
 function stopAll() {
     autoMoving = false; algoMoving = false; currentAlgo = null;
-    if (intervalId) clearInterval(intervalId);
-    intervalId = null;
-    document.getElementById("msg").innerText = "Đã dừng robot";
-    document.getElementById("algoResult").style.display = "none";
+    if (intervalId) clearInterval(intervalId); intervalId = null;
+    document.getElementById("msg").innerText = "Đã dừng robot"; document.getElementById("algoResult").style.display = "none";
 }
 
 // ---------------- Reset ----------------
@@ -370,8 +289,6 @@ async function resetGrid(){
     document.getElementById("current-time").innerText="-";
     trajectoryPoints=[]; clearTrajectory();
 }
-
-// ---------------- Reset All ----------------
 async function resetAllGrid(){
     stopAll();
     let resp = await fetch("/reset_all", {method:"POST"});
@@ -379,159 +296,119 @@ async function resetAllGrid(){
     robotPos=data.state; goal=data.map.goal; obstacles=data.map.obstacles; waypoints=data.map.waypoints||[];
     visitedWaypoints=[]; gridSizeX=data.map.width; gridSizeY=data.map.height;
     drawGridOnce(); updateRobot([0,0], robotPos);
-
-    // Reset biểu đồ & stats
-    allAlgoData = {};
-    rewardChart.data.labels = [];
-    rewardChart.data.datasets = [];
-    rewardChart.update();
-
+    allAlgoData = {}; rewardChart.data.labels = []; rewardChart.data.datasets = []; rewardChart.update();
     clearTrajectory();
     document.getElementById("msg").innerText="🌍 Gridworld đã được reset toàn bộ";
-    document.getElementById("current-algorithm").innerText="-";
-    document.getElementById("current-reward").innerText="-";
-    document.getElementById("current-steps").innerText="-";
-    document.getElementById("current-waypoints").innerText="-";
+    updateStats("-", "-", "-", "-");
     document.getElementById("current-time").innerText="-";
 }
 
-// ---------------- Run RL Algorithms step-by-step ----------------
-async function runAlgorithm(algo){
-    stopAll();
-    currentAlgo = algo;
-    allAlgoData[algo] = { rewards: [], color: randomColor() };
-    let totalReward = 0;
-    let steps = 0;
-    
-    const resultDiv = document.getElementById("algoResult");
-    resultDiv.style.display = "block";
-    resultDiv.innerHTML = `<div class="loading"></div> Đang chạy thuật toán ${algo}...`;
+// ---------------- Chạy thuật toán ----------------
 
-    // Reset trạng thái trước khi chạy
+// CŨ: Chạy từng bước cho MC, Q-learning, A2C
+async function runAlgorithmStepByStep(algo){
+    stopAll(); currentAlgo = algo; allAlgoData[algo] = { rewards: [], color: randomColor() };
+    let totalReward = 0, steps = 0;
+    const resultDiv = document.getElementById("algoResult");
+    resultDiv.style.display = "block"; resultDiv.innerHTML = `<div class="loading"></div> Đang chạy ${algo}...`;
     await resetGrid();
-    
-    // Bắt đầu vòng lặp từng bước
     intervalId = setInterval(async () => {
         try {
             let prevPos = [...robotPos];
-            const resp = await fetch("/step_algorithm", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ algorithm: algo })
-            });
+            const resp = await fetch("/step_algorithm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ algorithm: algo }) });
             const data = await resp.json();
-
-            if (data.error) {
-                resultDiv.innerHTML = `❌ Lỗi: ${data.error}`;
-                stopAll();
-                return;
-            }
-
-            robotPos = data.state;
-            visitedWaypoints = data.visited_waypoints || [];
+            if (data.error) { resultDiv.innerHTML = `❌ Lỗi: ${data.error}`; stopAll(); return; }
+            robotPos = data.state; visitedWaypoints = data.visited_waypoints || [];
             updateRobot(prevPos, robotPos);
-            
-            totalReward += data.reward;
-            steps = data.steps;
+            totalReward += data.reward; steps = data.steps;
             allAlgoData[algo].rewards.push(totalReward);
-            
-            updateStats(
-                algo,
-                totalReward.toFixed(1),
-                steps,
-                `${visitedWaypoints.length}/${waypoints.length}`
-            );
-
+            updateStats(algo, totalReward.toFixed(1), steps, `${visitedWaypoints.length}/${waypoints.length}`);
             if (data.done) {
-                resultDiv.innerHTML = `
-                    ✅ <strong>${algo}</strong><br>
-                    🎯 Reward: ${totalReward.toFixed(1)}<br>
-                    👣 Steps: ${steps}<br>
-                    📍 Waypoints: ${visitedWaypoints.length}/${waypoints.length}<br>
-                    🏆 <strong>Robot đã đến đích!</strong>
-                `;
+                resultDiv.innerHTML = `✅ <strong>${algo}</strong><br>🎯 Reward: ${totalReward.toFixed(1)}<br>👣 Steps: ${steps}<br>🏆 <strong>Đã đến đích!</strong>`;
                 stopAll();
-            } else {
-                resultDiv.innerHTML = `<div class="loading"></div> Đang chạy thuật toán ${algo}...`;
-            }
-
+            } else { resultDiv.innerHTML = `<div class="loading"></div> Đang chạy ${algo}...`; }
             updateChart();
-        } catch (e) {
-            console.error(e);
-            resultDiv.innerHTML = "❌ Có lỗi xảy ra khi chạy thuật toán";
-            stopAll();
-        }
-    }, 200); // Tốc độ di chuyển: 200ms mỗi bước
+        } catch (e) { console.error(e); resultDiv.innerHTML = "❌ Lỗi khi chạy thuật toán"; stopAll(); }
+    }, 200);
 }
 
-// ---------------- Run A* (unchanged, vẫn hoạt động tốt) ----------------
+// MỚI: Huấn luyện rồi chạy cho SARSA
+async function trainAndRunSarsa() {
+    stopAll(); currentAlgo = "SARSA";
+    const resultDiv = document.getElementById("algoResult");
+    resultDiv.style.display = "block";
+    resultDiv.innerHTML = `<div class="loading"></div> Đang huấn luyện SARSA (có thể mất vài giây)...`;
+    await resetGrid(); 
+    
+    try {
+        const resp = await fetch("/train_and_run_sarsa", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ episodes: 2000 })
+        });
+        const data = await resp.json();
+
+        if (data.error) { resultDiv.innerHTML = `❌ Lỗi: ${data.error}`; return; }
+        allAlgoData[data.algorithm] = { rewards: data.rewards_over_time, color: randomColor() };
+
+        let path = data.path;
+        for (let i = 1; i < path.length; i++) {
+            await new Promise(r => setTimeout(r, 50));
+            let prevPos = [...robotPos]; robotPos = path[i];
+            updateRobot(prevPos, robotPos);
+        }
+
+        updateStats(data.algorithm, data.reward.toFixed(1), data.steps, `${data.visited_waypoints.length}/${waypoints.length}`);
+        document.getElementById("current-time").innerText = `${data.elapsed_time.toFixed(2)} s (server)`;
+
+        resultDiv.innerHTML = `
+            ✅ <strong>${data.algorithm}</strong> (${data.info.note})<br>
+            🎯 Reward: ${data.reward.toFixed(1)}<br>
+            👣 Steps: ${data.steps}<br>
+            📍 Waypoints: ${data.visited_waypoints.length}/${waypoints.length}<br>
+            ${data.done ? "🏆 <strong>Robot đã đến đích!</strong>" : "⚠️ <strong>Không đến được đích.</strong>"}
+        `;
+        updateChart();
+        drawTrajectory();
+    } catch (e) {
+        console.error(e); resultDiv.innerHTML = "❌ Có lỗi xảy ra khi chạy SARSA";
+    }
+}
+
+// Chạy A*
 async function runAStar(){
     stopAll(); currentAlgo="A*";
     const resultDiv = document.getElementById("algoResult");
-    resultDiv.style.display = "block";
-    resultDiv.innerHTML = `<div class="loading"></div> Đang chạy thuật toán A*...`;
-
+    resultDiv.style.display = "block"; resultDiv.innerHTML = `<div class="loading"></div> Đang chạy A*...`;
     try{
         let prevPos = [...robotPos];
         const resp = await fetch("/run_a_star",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
         const data = await resp.json();
         if(data.error){ resultDiv.innerHTML = `❌ Lỗi: ${data.error}`; return; }
-        
         allAlgoData[data.algorithm] = { rewards: data.rewards_over_time, color: randomColor() };
-
         let path = data.path;
         for(let i=1;i<path.length;i++){
-            await new Promise(r=>setTimeout(r,200));
-            prevPos = [...robotPos];
-            robotPos = path[i];
-            visitedWaypoints = data.visited_waypoints||[];
+            await new Promise(r=>setTimeout(r,50));
+            prevPos = [...robotPos]; robotPos = path[i];
             updateRobot(prevPos, robotPos);
         }
-
-        updateStats(
-            data.algorithm,
-            data.reward.toFixed(1),
-            data.steps,
-            `${data.visited_waypoints.length}/${waypoints.length}`
-        );
-
-        resultDiv.innerHTML = `
-            ✅ <strong>${data.algorithm}</strong><br>
-            🎯 Reward: ${data.reward.toFixed(1)}<br>
-            👣 Steps: ${data.steps}<br>
-            📍 Waypoints: ${data.visited_waypoints.length}/${waypoints.length}<br>
-            ${data.done ? "🏆 <strong>Robot đã đến đích!</strong>" : ""}
-        `;
-
-        updateChart();
-    } catch(e){
-        console.error(e); 
-        resultDiv.innerHTML = "❌ Có lỗi xảy ra khi chạy A*";
-    }
+        updateStats(data.algorithm, data.reward.toFixed(1), data.steps, `${data.visited_waypoints.length}/${waypoints.length}`);
+        document.getElementById("current-time").innerText = `${data.elapsed_time.toFixed(2)} s`;
+        resultDiv.innerHTML = `✅ <strong>${data.algorithm}</strong><br>🎯 Reward: ${data.reward.toFixed(1)}<br>👣 Steps: ${data.steps}<br>${data.done ? "🏆 <strong>Đã đến đích!</strong>" : ""}`;
+        updateChart(); drawTrajectory();
+    } catch(e){ console.error(e); resultDiv.innerHTML = "❌ Có lỗi xảy ra khi chạy A*"; }
 }
 
-// ---------------- Draw & Clear Trajectory ----------------
+// ---------------- Vẽ đường đi & Cập nhật Stats ----------------
 function drawTrajectory(){
-    let canvas=document.getElementById("trajectory");
-    let ctx=canvas.getContext("2d");
-    clearTrajectory();
-    if(trajectoryPoints.length<2) return;
+    let canvas=document.getElementById("trajectory"), ctx=canvas.getContext("2d");
+    clearTrajectory(); if(trajectoryPoints.length<2) return;
     ctx.beginPath();
     let scaleX=canvas.width/gridSizeX, scaleY=canvas.height/gridSizeY;
     ctx.moveTo(trajectoryPoints[0][0]*scaleX+scaleX/2, trajectoryPoints[0][1]*scaleY+scaleY/2);
-    for(let i=1;i<trajectoryPoints.length;i++){
-        ctx.lineTo(trajectoryPoints[i][0]*scaleX+scaleX/2, trajectoryPoints[i][1]*scaleY+scaleY/2);
-    }
+    for(let i=1;i<trajectoryPoints.length;i++){ ctx.lineTo(trajectoryPoints[i][0]*scaleX+scaleX/2, trajectoryPoints[i][1]*scaleY+scaleY/2); }
     ctx.strokeStyle="red"; ctx.lineWidth=2; ctx.stroke();
 }
-
-function clearTrajectory(){
-    let canvas=document.getElementById("trajectory");
-    let ctx=canvas.getContext("2d");
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-}
-
-// ---------------- Update Stats ----------------
+function clearTrajectory(){ let canvas=document.getElementById("trajectory"); canvas.getContext("2d").clearRect(0,0,canvas.width,canvas.height); }
 function updateStats(algo, reward, steps, wp){
     document.getElementById("current-algorithm").innerText = algo;
     document.getElementById("current-reward").innerText = reward;
@@ -540,7 +417,7 @@ function updateStats(algo, reward, steps, wp){
 }
 
 // ---------------- Khởi tạo ----------------
-resetGrid();
+window.onload = resetGrid;
 </script>
 
 </body>
