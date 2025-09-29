@@ -118,6 +118,10 @@ WAYPOINTS = [(3, 2), (6, 5)]
 OBSTACLES = [(1, 1), (2, 3), (4, 4), (5, 1), (7, 6)]
 # CẬP NHẬT: Đặt giá trị mặc định cho max_steps
 env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=500)
+if not hasattr(env, 'episode_buffer'):
+    env.episode_buffer = []
+if not hasattr(env, 'state_visit_count'):
+    env.state_visit_count = defaultdict(int)
 
 REWARD_PARAMS = {
     "step_penalty": -0.01,     # Very small step penalty
@@ -141,10 +145,6 @@ for k, v in REWARD_PARAMS.items():
 models_dir = os.path.join(os.path.dirname(__file__), "../clients/models")
 os.makedirs(models_dir, exist_ok=True)
 
-# ---------------------------
-# Q-tables (LOAD SỚM, TOÀN CỤC)
-# ---------------------------
-actions = ['up', 'right', 'down', 'left']
 
 def _new_qrow():
     return {a: 0.0 for a in actions}
@@ -162,8 +162,6 @@ def _load_qtable(path: str):
     return defaultdict(_new_qrow)
 
 mc_qfile     = os.path.join(models_dir, "mc_qtable.pkl")
-ql_qfile     = os.path.join(models_dir, "qlearning_qtable.pkl")
-sarsa_qfile  = os.path.join(models_dir, "sarsa_qtable.pkl")
 
 mc_Q    = _load_qtable(mc_qfile)
 ql_Q    = _load_qtable(ql_qfile)
@@ -355,7 +353,7 @@ def get_map():
 
 @app.post("/reset")
 def reset(req: ResetRequest):
-    global env, epsilon
+    global env
     with _env_lock:
         w = req.width or env.width
         h = req.height or env.height
@@ -363,15 +361,13 @@ def reset(req: ResetRequest):
         g = req.goal or env.goal
         wp = req.waypoints if req.waypoints is not None else list(env.waypoints)
         ob = req.obstacles if req.obstacles is not None else list(env.obstacles)
-        ms = req.max_steps if req.max_steps is not None else DEFAULT_MAX_STEPS
+        ms = req.max_steps if req.max_steps is not None else 500
 
         env = GridWorldEnv(w, h, s, g, ob, wp, max_steps=ms)
-        for k, v in REWARD_PARAMS.items():
-            setattr(env, k, v)
-
-        # Reset epsilon for new learning session
-        epsilon = 0.3  # Start with balanced exploration
+        env.episode_buffer = []
+        env.state_visit_count = defaultdict(int)
         state = env.reset(max_steps=ms)
+        
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
 import random
@@ -571,6 +567,7 @@ def step_algorithm(req: AlgorithmRequest):
         done = False
 
         if algo == "MC":
+
             action_name = _select_action_from(mc_Q, full_state, epsilon)
             action_idx = actions.index(action_name)
             next_state, r, done_raw, _ = env.step(action_idx)
