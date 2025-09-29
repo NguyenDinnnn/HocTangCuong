@@ -20,6 +20,95 @@ _env_lock = Lock()
 app.mount("/web", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../clients/web")), name="web")
 
 # ---------------------------
+# State Abstraction Functions (Đồng bộ với qlearning_trainer_optimized.py)
+# ---------------------------
+
+def encode_visited(wp_list, visited_set):
+    """Mã hóa trạng thái Waypoint đã thăm dưới dạng một số nguyên."""
+    code = 0
+    for i, wp in enumerate(wp_list):
+        if wp in visited_set:
+            code |= (1 << i)
+    return code
+
+def get_abstract_state(env):
+    """
+    Trả về trạng thái trừu tượng hóa (relative direction) cho phép tổng quát hóa.
+    Keys: (sign_dx_goal, sign_dy_goal, sign_dx_nearest_wp, sign_dy_nearest_wp, 
+            visited_code, local_obstacle_code)
+    
+    Sign function: -1 (phải đi Lùi/Xuống), 0 (đã ngang hàng), 1 (phải đi Tới/Lên).
+    """
+    robot_x, robot_y = env.get_state()
+    goal_x, goal_y = env.goal
+    waypoints = env.waypoints
+    obstacles = env.obstacles
+    visited_waypoints = env.visited_waypoints
+    
+    # Hàm Sign: Lấy hướng tương đối
+    def get_sign(delta):
+        if delta > 0: return 1
+        if delta < 0: return -1
+        return 0
+    
+    # 1. Delta tới Goal (dưới dạng Sign)
+    delta_x_goal = goal_x - robot_x
+    delta_y_goal = goal_y - robot_y
+    sign_dx_goal = get_sign(delta_x_goal)
+    sign_dy_goal = get_sign(delta_y_goal)
+    
+    # 2. Delta tới Waypoint gần nhất (chưa thăm)
+    targets = [wp for wp in waypoints if wp not in visited_waypoints]
+    
+    sign_dx_nearest_wp = 0
+    sign_dy_nearest_wp = 0
+    
+    if targets:
+        # Tìm Waypoint gần nhất (dùng khoảng cách Manhattan)
+        def manhattan_distance(wp):
+            return abs(wp[0]-robot_x) + abs(wp[1]-robot_y)
+            
+        nearest_wp = min(targets, key=manhattan_distance)
+        
+        delta_x_nearest_wp = nearest_wp[0] - robot_x
+        delta_y_nearest_wp = nearest_wp[1] - robot_y
+        
+        sign_dx_nearest_wp = get_sign(delta_x_nearest_wp)
+        sign_dy_nearest_wp = get_sign(delta_y_nearest_wp)
+    
+    # 3. Visited Code
+    visited_code = encode_visited(waypoints, visited_waypoints)
+    
+    # 4. Local Obstacle Code (4-bit code)
+    # Lên (0b0001), Phải (0b0010), Xuống (0b0100), Trái (0b1000)
+    local_obstacle_code = 0
+    
+    current_width = env.width
+    current_height = env.height
+    
+    neighbors = {
+        'up': (robot_x, robot_y - 1),
+        'right': (robot_x + 1, robot_y),
+        'down': (robot_x, robot_y + 1),
+        'left': (robot_x - 1, robot_y),
+    }
+
+    # Kiểm tra xem ô lân cận có phải là chướng ngại vật hay tường không
+    if neighbors['up'] in obstacles or not (0 <= neighbors['up'][1] < current_height):
+        local_obstacle_code |= 0b0001
+    if neighbors['right'] in obstacles or not (0 <= neighbors['right'][0] < current_width):
+        local_obstacle_code |= 0b0010
+    if neighbors['down'] in obstacles or not (0 <= neighbors['down'][1] < current_height):
+        local_obstacle_code |= 0b0100
+    if neighbors['left'] in obstacles or not (0 <= neighbors['left'][0] < current_width):
+        local_obstacle_code |= 0b1000
+    
+    # Kết hợp các đặc trưng tương đối thành Full Abstract State Key (6 đặc trưng)
+    return (sign_dx_goal, sign_dy_goal, 
+            sign_dx_nearest_wp, sign_dy_nearest_wp, 
+            visited_code, local_obstacle_code)
+    
+# ---------------------------
 # Environment + Reward params (thống nhất)
 # ---------------------------
 GRID_W, GRID_H = 10, 8
@@ -27,6 +116,8 @@ START = (0, 0)
 GOAL = (9, 7)
 WAYPOINTS = [(3, 2), (6, 5)]
 OBSTACLES = [(1, 1), (2, 3), (4, 4), (5, 1), (7, 6)]
+# CẬP NHẬT: Đặt giá trị mặc định cho max_steps
+env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=500)
 
 REWARD_PARAMS = {
     "step_penalty": -0.01,     # Very small step penalty
@@ -108,12 +199,40 @@ if os.path.exists(a2c_model_file):
         print(f"⚠️ Không load được A2C checkpoint: {e}. Dùng model mới.")
 
 # ---------------------------
-# Simple Q-Learning parameters
+# Load Q-learning (Đã cập nhật để dùng file abstract TỐI ƯU)
 # ---------------------------
-alpha, gamma = 0.1, 0.9     # Standard learning parameters
-epsilon = 1.0                # Start with full exploration  
-epsilon_min = 0.01          # Very low minimum for strong exploitation
-epsilon_decay = 0.995       # Gradual decay
+# ĐỒNG BỘ: Sử dụng tên file mô hình Q-learning đã được huấn luyện với state abstraction TỐI ƯU.
+ql_qfile = os.path.join(models_dir, "qlearning_qtable_abstract_optimized.pkl") 
+if os.path.exists(ql_qfile):
+    with open(ql_qfile, "rb") as f:
+        loaded_ql_Q = pickle.load(f)
+    # Khôi phục defaultdict
+    ql_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    # Kiểm tra và tải Q-table từ định dạng mới (có chứa 'Q' và 'epsilon')
+    if isinstance(loaded_ql_Q, dict) and 'Q' in loaded_ql_Q:
+        ql_Q.update(loaded_ql_Q['Q'])
+        # Tải Epsilon (nếu có, để đảm bảo tính nhất quán khi chạy trên Server)
+        epsilon = loaded_ql_Q.get('epsilon', 1.0) 
+    else: # Hỗ trợ định dạng cũ (chỉ Q-table)
+        ql_Q.update(loaded_ql_Q)
+        epsilon = 1.0 # Đặt lại epsilon nếu load định dạng cũ
+    print(f"✅ Đã load Q-learning model từ: {ql_qfile}")
+else:
+    ql_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    print(f"⚠️ Không tìm thấy Q-learning model tại: {ql_qfile}. Sử dụng Q-table rỗng.")
+
+# ---------------------------
+# RL params (Đã đồng bộ gamma)
+# ---------------------------
+actions = ['up', 'right', 'down', 'left']
+alpha = 0.2
+gamma = 0.95 # << ĐỒNG BỘ: Gamma = 0.9995 (Tối ưu hóa tầm nhìn dài hạn)
+epsilon_decay_rate = 0.98 # << ĐỒNG BỘ: Tỷ lệ giảm Epsilon tối ưu
+
+# LƯU Ý: Epsilon đã được khởi tạo/tải ở phần Load Q-learning (nếu có)
+if 'epsilon' not in locals():
+    epsilon = 1.0
+INITIAL_EPSILON = 1.0 # Giá trị epsilon ban đầu để dùng cho Reset All
 
 # ---------------------------
 # Request Models
@@ -200,6 +319,32 @@ def _apply_goal_guard_and_unified_reward(r: float, reached_goal_now: bool) -> fl
         r += REWARD_PARAMS["goal_before_waypoints_penalty"]
     return r
 
+# ---------------------------
+# Extend GridWorldEnv for A* step (RL-style reward)
+# ---------------------------
+def step_to_rl(self, target):
+    """
+    Di chuyển robot đến ô target, tính toán reward theo cách RL 
+    (thu thập waypoint, về đích).
+    """
+    self.state = target
+    self.steps += 1
+    reward = -0.1 # Penalty cho mỗi bước đi
+    done = False
+    
+    if target in self.waypoints and target not in self.visited_waypoints:
+        self.visited_waypoints.add(target)
+        reward = 1.0 # Reward khi ghé thăm Waypoint
+        
+    # Điều kiện hoàn thành: Đã đến Goal VÀ đã ghé thăm tất cả Waypoint
+    if target == self.goal and len(self.visited_waypoints) == len(self.waypoints):
+        done = True
+        reward = 10.0 # Reward lớn khi hoàn thành
+        
+    info = {"note": "Auto move by A* (RL reward)"}
+    return target, reward, done, info
+
+GridWorldEnv.step_to = step_to_rl
 # ---------------------------
 # Endpoints
 # ---------------------------
@@ -448,35 +593,33 @@ def step_algorithm(req: AlgorithmRequest):
             epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
         elif algo == "Q-learning":
-            # Sử dụng simple state (x, y) giống như trong train_qlearning.py
-            simple_state = tuple(state_xy)
-            action_name = _select_action_from(ql_Q, simple_state, epsilon)
+            # 1. Chọn hành động bằng Abstract State hiện tại (epsilon-greedy)
+            if np.random.rand() < epsilon:
+                action_name = np.random.choice(actions)
+            else:
+                # Dùng abstract_state làm key để chọn hành động tối ưu
+                action_name = max(ql_Q[abstract_state], key=ql_Q[abstract_state].get) 
+            
             action_idx = actions.index(action_name)
             
-            old_state = tuple(state_xy)
-            next_state, r, done_raw, _ = env.step(action_idx)
-            new_state = tuple(next_state)
-
-            # Apply simple reward shaping for Q-Learning
-            r = _apply_simple_reward_shaping(old_state, new_state, r)
+            # 2. Thực hiện hành động
+            next_state, r, done, _ = env.step(action_idx)
             
-            reached_goal_now = (new_state == env.goal)
-            r = _apply_goal_guard_and_unified_reward(r, reached_goal_now)
-            done = (new_state == env.goal and len(env.visited_waypoints) == len(env.waypoints)) or env.steps >= env.max_steps
-
-            next_simple_state = new_state
-
-            ql_Q[simple_state][action_name] += alpha * (
-                r + gamma * max(ql_Q[next_simple_state].values()) - ql_Q[simple_state][action_name]
+            # 3. Lấy next_abstract_state sau khi bước
+            next_abstract_state = get_abstract_state(env) 
+            
+            # 4. Cập nhật Q-value (dùng next_abstract_state để tìm max Q)
+            # Q(s,a) = Q(s,a) + alpha * (r + gamma * max(Q(s',a')) - Q(s,a))
+            ql_Q[abstract_state][action_name] += alpha * (
+                r + gamma * max(ql_Q[next_abstract_state].values()) - ql_Q[abstract_state][action_name]
             )
-
-            ql_Q = _save_and_reload_q(ql_Q, ql_qfile)
-
-            reward = r
+            
             state_xy = next_state
-            # Optimized epsilon decay for Q-learning
-            epsilon = max(epsilon_min, epsilon * epsilon_decay)
-
+            reward = r
+            
+            # 5. Giảm Epsilon (Sử dụng decay rate mới)
+            epsilon = max(0.01, epsilon * epsilon_decay_rate) 
+            
         elif algo == "SARSA":
             action_name = _select_action_from(sarsa_Q, full_state, epsilon)
             action_idx = actions.index(action_name)
