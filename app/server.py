@@ -236,7 +236,7 @@ else:
 # RL params
 # ---------------------------
 actions = ['up', 'right', 'down', 'left']
-alpha, gamma = 0.1, 0.99
+alpha, gamma = 0.1, 0.95
 epsilon = 1.0
 mc_Q = defaultdict(lambda: {a: 0.1 for a in actions})
 mc_N = defaultdict(lambda: {a: 0 for a in actions})
